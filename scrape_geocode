@@ -1,0 +1,119 @@
+#!/usr/bin/env python
+# Author: Harald Schernthanner
+
+##%I Scrape data. Source https://statisquo.de/2018/06/11/immobilienscout24-mining-2-0-der-web-scraper-fuer-haeuser/
+# The codebase of part I had to be partly rewritten, as immobilienscout24 changed the structure on how data was put on their website. 
+
+import os
+import bs4 as bs
+import urllib.request
+import time
+from datetime import datetime
+import pandas as pd
+import json
+
+os.chdir('/home/hatschito/rentalmap/csv/')
+
+#Set the number of loops depending on the existing pages
+for pagenumber in range(1,10):
+
+    print("Loop " + str(pagenumber) + " startet.")
+    df = pd.DataFrame()
+    l=[]
+    try:
+
+        soup = bs.BeautifulSoup(urllib.request.urlopen("https://www.immobilienscout24.de/Suche/de/brandenburg/potsdam/wohnung-mieten?"+ str("pagenumber=") + str(pagenumber)).read(),'lxml')
+        print("Aktuelle Seite: "+"https://www.immobilienscout24.de/Suche/de/brandenburg/potsdam/wohnung-mieten?"+ str("pagenumber=") +str(pagenumber))
+        for paragraph in soup.find_all("a"):
+            if r"/expose/" in str(paragraph.get("href")):
+                l.append(paragraph.get("href").split("#")[0])
+            l = list(set(l))
+        for item in l:
+            try:
+                soup = bs.BeautifulSoup(urllib.request.urlopen('https://www.immobilienscout24.de'+item).read(),'lxml')
+                data = pd.DataFrame(json.loads(str(soup.find_all("script")).split("keyValues = ")[1].split("}")[0]+str("}")),index=[str(datetime.now())])
+                data["URL"] = str(item)
+                beschreibung = []
+                for i in soup.find_all("pre"):
+                    beschreibung.append(i.text)
+                data["beschreibung"] = str(beschreibung)
+                df = df.append(data)
+            except Exception as e:
+                print(str(datetime.now())+": " + str(e))
+                l = list(filter(lambda x: x != item, l))
+                print("ID " + str(item) + " entfernt.")
+        print("Exportiert CSV")
+        df.to_csv("/home/hatschito/rentalmap/csv/"+str(datetime.now())[:19].replace(":","").replace(".","")+".csv",sep=";",decimal=",",encoding = "utf-8",index_label="timestamp")
+        print("Loop " + str(pagenumber) + " endet.\n")
+
+    except Exception as e:
+        print(str(datetime.now())+": " + str(e))
+print("FERTIG!")
+
+
+df = pd.DataFrame()
+n=0
+for i in os.listdir("/home/hatschito/rentalmap/csv/"):
+    n+=1
+    df = df.append(pd.read_csv("/home/hatschito/rentalmap/csv/"+str(i),sep=";",decimal=",",encoding="utf-8"))
+    print("Durchgang "+str(n))
+
+
+
+#Remove duplicates
+df = df.drop_duplicates(subset="URL")
+df.dtypes
+
+
+##%II Geocode the data
+os.chdir('/home/hatschito/rentalmap/csv/')
+
+import geopandas as gpd
+import pandas as pd
+import geopy
+from geopy.extra.rate_limiter import RateLimiter
+from geopy.geocoders import Nominatim
+locator = Nominatim(user_agent= 'myGeocoder')
+
+
+
+#concatenate Streetnames and zipcode to one column for the geocoder
+#Convert the columns to string
+df["obj_zipCode"] = df["obj_zipCode"].astype(str)
+df["obj_streetPlain"].astype(str)
+df["obj_zipCode"].dtypes
+df["obj_streetPlain"].dtypes
+
+# concatenate with space
+df['zip_address'] = df['obj_zipCode'] +' '+  df['obj_streetPlain']
+
+# 1 - Convenient function to delay between geocoding calls
+geocode = RateLimiter(locator.geocode, min_delay_seconds=1)
+#Geocode without delay
+#geocode = RateLimiter(locator.geocode)
+# 2- - create location column
+df['location'] = df['zip_address'].apply(geocode)
+
+# 3 - create longitude, laatitude and altitude from location column (returns tuple)
+df['point'] = df['location'].apply(lambda loc: tuple(loc.point) if loc else None)
+
+#Clean out all data without entries
+df_lat_long = df[df.point.notnull()]
+
+# 4 - split point column into latitude, longitude and altitude columns
+df_lat_long[['latitude', 'longitude', 'altitude']] = pd.DataFrame(df_lat_long['point'].tolist(), index=df_lat_long.index)
+
+
+
+df_lat_long.drop_duplicates(subset ="URL",
+                     keep = "last", inplace = True)
+
+df_lat_long[["latitude", "longitude"]] = df_lat_long[["latitude", "longitude"]].astype(float)
+
+gdf = gpd.GeoDataFrame(
+    df_lat_long, geometry=gpd.points_from_xy(df_lat_long.longitude, df_lat_long.latitude))
+
+
+
+file= "/home/hatschito/rentalmap/csv/potsdam_rents.csv"
+gdf.to_csv(file, sep=";",decimal=".",encoding="utf-8")
